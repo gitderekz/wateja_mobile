@@ -17,6 +17,7 @@ class HomePageScreen extends StatefulWidget {
 class _HomePageScreenState extends State<HomePageScreen> {
   Map<String, dynamic> summary = {};
   bool loading = true;
+  List<Map<String, String>> recentActivities = [];
 
   @override
   void initState() {
@@ -49,7 +50,75 @@ class _HomePageScreenState extends State<HomePageScreen> {
     } catch (e) {
       // ignore
     }
+    await _loadRecentActivities();
     setState(() => loading = false);
+  }
+
+  Future<void> _loadRecentActivities() async {
+    recentActivities = [];
+    try {
+      final client = ApiClient();
+      // Use role-aware endpoints
+      final auth = Provider.of<AuthNotifier>(context, listen: false);
+      final role = auth.user?['role'] as String? ?? 'client';
+
+      if (role == 'admin') {
+        // admin: fetch system logs
+        final resp = await client.get('/logs');
+        if (resp.statusCode == 200 && resp.body.isNotEmpty) {
+          final parsed = jsonDecode(resp.body) as Map<String, dynamic>;
+          final logs = (parsed['logs'] as List?) ?? [];
+          for (final l in logs.take(6)) {
+            final user = l['user'] != null ? (l['user']['name'] ?? 'Unknown') : (l['userName'] ?? 'Unknown');
+            final createdAt = l['createdAt'] ?? l['created_at'] ?? '';
+            recentActivities.add({'action': l['action'] ?? 'Activity', 'detail': user.toString(), 'time': _relativeTime(createdAt)});
+          }
+        }
+      } else {
+        // client/other: fetch recent orders (most useful activity)
+        final resp = await client.get('/orders', queryParams: {'limit': '6'});
+        if (resp.statusCode == 200 && resp.body.isNotEmpty) {
+          final parsed = jsonDecode(resp.body) as Map<String, dynamic>;
+          final orders = (parsed['orders'] as List?) ?? [];
+          for (final o in orders) {
+            final id = o['id']?.toString() ?? o['orderNumber']?.toString() ?? 'Order';
+            final total = o['totalAmount'] ?? o['total'] ?? '';
+            final time = o['createdAt'] ?? o['created_at'] ?? '';
+            recentActivities.add({'action': 'Order #$id', 'detail': 'TZS ${total.toString()}', 'time': _relativeTime(time)});
+            if (recentActivities.length >= 6) break;
+          }
+
+          // also try to fetch recently unlocked lessons for the user
+          final lessonsResp = await client.get('/lesson-access/my-lessons');
+          if (lessonsResp.statusCode == 200 && lessonsResp.body.isNotEmpty) {
+            final lp = jsonDecode(lessonsResp.body) as Map<String, dynamic>;
+            final userLessons = (lp['lessons'] as List?) ?? (lp['data'] as Map<String, dynamic>?)?['lessons'] as List? ?? [];
+            for (final ls in userLessons.take(3)) {
+              final title = ls['title'] ?? ls['name'] ?? 'Lesson';
+              recentActivities.insert(0, {'action': 'Lesson Unlocked', 'detail': title.toString(), 'time': _relativeTime(ls['createdAt'] ?? ls['created_at'] ?? '')});
+            }
+            if (recentActivities.length > 6) recentActivities = recentActivities.sublist(0, 6);
+          }
+        }
+      }
+    } catch (e) {
+      // ignore network errors for now
+    }
+    setState(() {});
+  }
+
+  String _relativeTime(dynamic value) {
+    try {
+      if (value == null || value.toString().isEmpty) return '';
+      final dt = DateTime.parse(value.toString());
+      final diff = DateTime.now().difference(dt);
+      if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+      if (diff.inHours < 24) return '${diff.inHours}h ago';
+      if (diff.inDays < 7) return '${diff.inDays}d ago';
+      return '${(diff.inDays / 7).floor()}w ago';
+    } catch (e) {
+      return '';
+    }
   }
 
   @override
@@ -148,56 +217,60 @@ class _HomePageScreenState extends State<HomePageScreen> {
   }
 
   Widget _buildChart() {
-    // Try to read a simple revenue series from summary, else synthesize
-    final List<num> series = [];
+    // Build a BarChart using fl_chart from `summary.revenueByDay` or synthesize
+    final List<double> values = [];
     if (summary.containsKey('revenueByDay') && summary['revenueByDay'] is List) {
       for (final v in summary['revenueByDay']) {
-        if (v is num) {
-          series.add(v);
+        try {
+          values.add((v as num).toDouble());
+        } catch (_) {
+          continue;
         }
       }
     }
-    if (series.isEmpty) {
+    if (values.isEmpty) {
       final total = (summary['totalRevenue'] ?? 0) as num;
       if (total > 0) {
-        // simple synthetic last-7-days split
         for (var i = 0; i < 7; i++) {
-          series.add((total / 7) * (0.5 + (i / 14)));
+          values.add(((total / 7) * (0.5 + (i / 14))).toDouble());
         }
       } else {
         for (var i = 0; i < 7; i++) {
-          series.add(0);
+          values.add(0.0);
         }
       }
     }
 
-    final maxVal = series.fold<num>(0, (p, e) => e > p ? e : p);
-
+    // Lightweight fallback chart (simple bars) to avoid package compatibility issues.
+    final maxY = values.isNotEmpty ? values.reduce((a, b) => a > b ? a : b) : 1.0;
     return SizedBox(
-      height: 90,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-            children: series.map((v) {
-              final double height = maxVal > 0 ? (v / maxVal * 70).toDouble() : 4.0;
-            return Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                      Container(
-                        height: height,
-                        decoration: BoxDecoration(color: Colors.deepPurple, borderRadius: BorderRadius.circular(4)),
-                      ),
-                    const SizedBox(height: 6),
-                    Text('', style: const TextStyle(fontSize: 10, color: Colors.grey)),
-                  ],
+      height: 120,
+      child: Card(
+        elevation: 0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: List.generate(values.length, (i) {
+              final v = values[i];
+              final height = maxY == 0 ? 0.0 : (v / maxY) * 80;
+              return Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      Container(height: height, decoration: BoxDecoration(color: Colors.deepPurple, borderRadius: BorderRadius.circular(4))),
+                      const SizedBox(height: 6),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
                 ),
-              ),
-            );
-          }).toList(),
+              );
+            }),
+          ),
         ),
       ),
     );
@@ -205,12 +278,7 @@ class _HomePageScreenState extends State<HomePageScreen> {
 
   Widget _buildRecentActivities() {
 
-    final activities = <Map<String, String>>[
-      {'action': 'Order completed', 'detail': 'Tomato Seeds', 'time': '2 days ago'},
-      {'action': 'Lesson unlocked', 'detail': 'Modern Farming Basics', 'time': '1 week ago'},
-      {'action': 'Consultation booked', 'detail': 'Soil Testing', 'time': '2 weeks ago'},
-      {'action': 'Payment processed', 'detail': 'Fertilizer Purchase', 'time': '3 weeks ago'},
-    ];
+    // recentActivities is populated from backend in _loadRecentActivities
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -221,22 +289,27 @@ class _HomePageScreenState extends State<HomePageScreen> {
         Card(
           elevation: 1,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          child: ListView.separated(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: activities.length,
-            separatorBuilder: (context, index) => const Divider(height: 1),
-            itemBuilder: (context, i) {
-              final a = activities[i];
-              return ListTile(
-                dense: true,
-                leading: CircleAvatar(child: Text(a['action']![0])),
-                title: Text(a['action']!),
-                subtitle: Text(a['detail']!),
-                trailing: Text(a['time']!, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              );
-            },
-          ),
+          child: recentActivities.isEmpty
+              ? Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Center(child: Text('No recent activity', style: TextStyle(color: Colors.grey[600]))),
+                )
+              : ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: recentActivities.length,
+                  separatorBuilder: (context, index) => const Divider(height: 1),
+                  itemBuilder: (context, i) {
+                    final a = recentActivities[i];
+                    return ListTile(
+                      dense: true,
+                      leading: CircleAvatar(backgroundColor: Colors.grey[100], child: Icon(Icons.history, color: Colors.deepPurple)),
+                      title: Text(a['action'] ?? ''),
+                      subtitle: Text(a['detail'] ?? ''),
+                      trailing: Text(a['time'] ?? '', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    );
+                  },
+                ),
         ),
       ],
     );

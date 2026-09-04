@@ -4,6 +4,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'package:go_router/go_router.dart';
 import 'src/router.dart';
+import 'src/theme/app_theme.dart';
 import 'src/providers/auth_notifier.dart';
 import 'src/providers/settings_provider.dart';
 
@@ -35,10 +36,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp.router(
       title: 'Wateja Mobile',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-      ),
+        theme: AppTheme.light(),
       routerConfig: router,
     );
   }
